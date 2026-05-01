@@ -1,0 +1,23 @@
+{
+  "name": "数字员工",
+  "short_name": "数字员工",
+  "description": "Hermes AI Agent Web UI",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "static/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "static/logo.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ]
+}
