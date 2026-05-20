@@ -58,3 +58,9 @@ THEMES.md
 docs/*
 !docs/ui-ux/
 !docs/ui-ux/**
+
+# Tests / scratch / CI / dev helpers — excluded from runtime distribution
+tests/
+scratch*.py
+start.sh
+.github/

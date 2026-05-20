@@ -1042,6 +1042,13 @@ function _ensureAppDialogBindings(){
   if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
   if(confirmBtn){
     confirmBtn.addEventListener('click',()=>{
+      if(APP_DIALOG.opts && typeof APP_DIALOG.opts.preConfirm === 'function'){
+        const result = APP_DIALOG.opts.preConfirm();
+        if (typeof result === 'string') { showToast(result); return; }
+        if (result === false) return;
+        _finishAppDialog(result);
+        return;
+      }
       if(APP_DIALOG.kind==='prompt'){
         const input=$('appDialogInput');
         _finishAppDialog(input?input.value:null);
@@ -1065,11 +1072,20 @@ function _ensureAppDialogBindings(){
         e.preventDefault();
         if(target===cancelBtn||target===closeBtn){
           _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
-        }else if(APP_DIALOG.kind==='prompt'){
-          const input=$('appDialogInput');
-          _finishAppDialog(input?input.value:null);
         }else{
-          _finishAppDialog(true);
+          if(APP_DIALOG.opts && typeof APP_DIALOG.opts.preConfirm === 'function'){
+            const result = APP_DIALOG.opts.preConfirm();
+            if (typeof result === 'string') { showToast(result); return; }
+            if (result === false) return;
+            _finishAppDialog(result);
+            return;
+          }
+          if(APP_DIALOG.kind==='prompt'){
+            const input=$('appDialogInput');
+            _finishAppDialog(input?input.value:null);
+          }else{
+            _finishAppDialog(true);
+          }
         }
       }
       return;
@@ -1093,8 +1109,12 @@ function showConfirmDialog(opts={}){
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
   APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.opts=opts;
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
-  if(desc) desc.textContent=opts.message||'';
+  if(desc) {
+    if(opts.html) desc.innerHTML=opts.html;
+    else desc.textContent=opts.message||'';
+  }
   if(input){input.style.display='none';input.value='';}
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
   if(confirmBtn){
@@ -1115,8 +1135,12 @@ function showPromptDialog(opts={}){
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
   APP_DIALOG.resolve=null;APP_DIALOG.kind='prompt';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.opts=opts;
   if(title) title.textContent=opts.title||t('dialog_prompt_title');
-  if(desc) desc.textContent=opts.message||'';
+  if(desc) {
+    if(opts.html) desc.innerHTML=opts.html;
+    else desc.textContent=opts.message||'';
+  }
   if(input){
     input.type=opts.inputType||'text';input.style.display='';
     input.value=opts.value||'';input.placeholder=opts.placeholder||'';

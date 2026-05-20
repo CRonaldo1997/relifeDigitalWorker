@@ -16,6 +16,8 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     get_config,
+    _get_config_path,
+    _save_yaml_config_file,
     invalidate_models_cache,
 )
 
@@ -329,3 +331,121 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
     Convenience wrapper around ``set_provider_key(id, None)``.
     """
     return set_provider_key(provider_id, None)
+
+
+def get_custom_providers() -> list[dict]:
+    """Return all custom providers defined in config.yaml."""
+    cfg = get_config()
+    custom = cfg.get("custom_providers", [])
+    if not isinstance(custom, list):
+        return []
+    result = []
+    for cp in custom:
+        if isinstance(cp, dict):
+            result.append({
+                "name": cp.get("name", ""),
+                "api_url": cp.get("api_url", cp.get("base_url", "")),
+                "api_key": cp.get("api_key", ""),
+                "model": cp.get("model", ""),
+            })
+    return result
+
+
+def set_custom_provider(name: str, api_url: str, api_key: str, model: str) -> dict[str, Any]:
+    """Add or update a custom provider in config.yaml."""
+    if not name:
+        return {"ok": False, "error": "Name is required for a custom provider."}
+    
+    from api.streaming import _ENV_LOCK
+    with _ENV_LOCK:
+        cfg = get_config()
+        custom = cfg.get("custom_providers", [])
+        if not isinstance(custom, list):
+            custom = []
+        
+        updated = False
+        for cp in custom:
+            if isinstance(cp, dict) and cp.get("name") == name:
+                cp["api_url"] = api_url
+                cp["base_url"] = api_url
+                cp["api_key"] = api_key
+                cp["model"] = model
+                updated = True
+                break
+        
+        if not updated:
+            custom.append({
+                "name": name,
+                "api_url": api_url,
+                "base_url": api_url,
+                "api_key": api_key,
+                "model": model
+            })
+            
+        cfg["custom_providers"] = custom
+        try:
+            _save_yaml_config_file(_get_config_path(), cfg)
+            invalidate_models_cache()
+            return {"ok": True, "action": "updated" if updated else "added"}
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to save custom provider: {e}"}
+
+
+def remove_custom_provider(name: str) -> dict[str, Any]:
+    """Remove a custom provider from config.yaml."""
+    if not name:
+        return {"ok": False, "error": "Name is required."}
+        
+    from api.streaming import _ENV_LOCK
+    with _ENV_LOCK:
+        cfg = get_config()
+        custom = cfg.get("custom_providers", [])
+        if not isinstance(custom, list):
+            return {"ok": False, "error": "No custom providers found."}
+            
+        new_custom = [cp for cp in custom if isinstance(cp, dict) and cp.get("name") != name]
+        if len(new_custom) == len(custom):
+            return {"ok": False, "error": f"Custom provider '{name}' not found."}
+            
+        cfg["custom_providers"] = new_custom
+        try:
+            _save_yaml_config_file(_get_config_path(), cfg)
+            invalidate_models_cache()
+            return {"ok": True, "action": "removed"}
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to remove custom provider: {e}"}
+
+
+def test_custom_provider_connectivity(api_url: str, api_key: str, model: str) -> dict[str, Any]:
+    """Test connectivity to a custom provider by calling its /chat/completions endpoint."""
+    import urllib.request
+    import json
+    
+    if not api_url:
+        return {"ok": False, "error": "API URL is required."}
+        
+    url = f"{api_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": model or "gpt-3.5-turbo",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 5
+    }
+    
+    try:
+        req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res = json.loads(response.read().decode('utf-8'))
+            return {"ok": True, "message": "Connection successful!"}
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode('utf-8')
+            return {"ok": False, "error": f"HTTP {e.code}: {err_body}"}
+        except:
+            return {"ok": False, "error": f"HTTP Error {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"ok": False, "error": f"Connection failed: {str(e)}"}
+

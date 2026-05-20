@@ -810,6 +810,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
+    source.addEventListener('status',e=>{
+      if(!S.session||S.session.session_id!==activeSid) return;
+      try{
+        const d=JSON.parse(e.data);
+        if(d.message){
+          if(typeof setComposerStatus==='function') setComposerStatus(d.message);
+          if(d.label==='warning' && typeof showToast==='function') showToast(d.message,5000);
+        }
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -832,6 +843,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
         setComposerStatus('Reconnecting…');
+        // 500ms initial delay — much faster than the old 1500ms, reduces
+        // perceived stall when the server sends a heartbeat-triggered reconnect.
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
@@ -843,7 +856,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){}
           if(await _restoreSettledSession()) return;
           _handleStreamError();
-        },1500);
+        },500);
         return;
       }
       if(await _restoreSettledSession()) return;

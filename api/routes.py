@@ -756,7 +756,12 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
+        from api.providers import get_providers
         return j(handler, get_providers())
+        
+    if parsed.path == "/api/providers/custom":
+        from api.providers import get_custom_providers
+        return j(handler, {"custom_providers": get_custom_providers()})
 
     if parsed.path == "/api/settings":
         settings = load_settings()
@@ -1183,6 +1188,43 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/custom":
+        name = (body.get("name") or "").strip()
+        api_url = (body.get("api_url") or body.get("base_url") or "").strip()
+        api_key = (body.get("api_key") or "").strip()
+        model = (body.get("model") or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        if not api_url:
+            return bad(handler, "api_url is required")
+        from api.providers import set_custom_provider
+        result = set_custom_provider(name, api_url, api_key, model)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+            
+    if parsed.path == "/api/providers/custom/delete":
+        name = (body.get("name") or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        from api.providers import remove_custom_provider
+        result = remove_custom_provider(name)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+        
+    if parsed.path == "/api/providers/custom/test":
+        api_url = (body.get("api_url") or body.get("base_url") or "").strip()
+        api_key = (body.get("api_key") or "").strip()
+        model = (body.get("model") or "").strip()
+        if not api_url:
+            return bad(handler, "api_url is required")
+        from api.providers import test_custom_provider_connectivity
+        result = test_custom_provider_connectivity(api_url, api_key, model)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Connection failed"))
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":
@@ -1995,7 +2037,8 @@ def _handle_list_dir(handler, parsed):
 
 def _handle_sse_stream(handler, parsed):
     stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
-    q = STREAMS.get(stream_id)
+    with STREAMS_LOCK:
+        q = STREAMS.get(stream_id)
     if q is None:
         return j(handler, {"error": "stream not found"}, status=404)
     handler.send_response(200)
@@ -2004,10 +2047,21 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "keep-alive")
     handler.end_headers()
+    # Disable socket-level read timeout for this long-lived SSE connection.
+    # The default Handler.timeout=30 is designed for short HTTP requests;
+    # leaving it active here would cause the server to close the socket after
+    # 30s of client silence, racing with our own 15s heartbeat and causing
+    # spurious 'error' events + reconnect cycles on the frontend.
+    try:
+        handler.connection.settimeout(None)
+    except Exception:
+        pass
     try:
         while True:
             try:
-                event, data = q.get(timeout=30)
+                # 15s heartbeat — well below the Handler.timeout=30s socket deadline
+                # so the socket stays alive while the agent thinks between events.
+                event, data = q.get(timeout=15)
             except queue.Empty:
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
@@ -2788,7 +2842,18 @@ def _handle_chat_start(handler, body):
         # Stale stream id from a previous run; clear and continue.
         s.active_stream_id = None
     stream_id = uuid.uuid4().hex
-    with _get_session_agent_lock(s.session_id):
+    _lock = _get_session_agent_lock(s.session_id)
+    if not _lock.acquire(timeout=3):
+        logger.warning(f"Chat start failed: could not acquire session lock for {s.session_id} after 3s")
+        return j(
+            handler,
+            {
+                "error": "Session is busy. If this persists, try stopping the current task or refresh the page.",
+                "session_id": s.session_id,
+            },
+            status=423,
+        )
+    try:
         s.workspace = workspace
         s.model = model
         s.active_stream_id = stream_id
@@ -2796,6 +2861,8 @@ def _handle_chat_start(handler, body):
         s.pending_attachments = attachments
         s.pending_started_at = time.time()
         s.save()
+    finally:
+        _lock.release()
     set_last_workspace(workspace)
     q = queue.Queue()
     with STREAMS_LOCK:

@@ -2374,22 +2374,196 @@ async function loadProvidersPanel(){
   if(!list) return;
   try{
     const data=await api('/api/providers');
+    const customData=await api('/api/providers/custom');
+    
     const providers=(data.providers||[]).filter(p=>p.configurable);
+    const customProviders = customData.custom_providers || [];
+    
     list.innerHTML='';
     _providerCardEls.clear();
-    if(providers.length===0){
-      list.style.display='none';
+    
+    // Add custom provider button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'sm-btn';
+    addBtn.style.marginBottom = '12px';
+    addBtn.style.alignSelf = 'flex-start';
+    addBtn.innerHTML = '+ Add Custom Model';
+    addBtn.onclick = () => _openCustomProviderModal();
+    list.appendChild(addBtn);
+    
+    if(providers.length===0 && customProviders.length === 0){
+      list.style.display='flex'; // to show the add button
       if(empty) empty.style.display='';
       return;
     }
     if(empty) empty.style.display='none';
-    list.style.display='';
+    list.style.display='flex';
+    
+    for(const cp of customProviders) {
+      list.appendChild(_buildCustomProviderCard(cp));
+    }
+    
     for(const p of providers){
       list.appendChild(_buildProviderCard(p));
     }
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+e.message+'</div>';
   }
+}
+
+function _openCustomProviderModal(cp = null) {
+  const isEdit = !!cp;
+  const name = cp ? cp.name : '';
+  const apiUrl = cp ? cp.api_url : '';
+  const apiKey = cp ? cp.api_key : '';
+  const model = cp ? cp.model : '';
+  
+  const inputStyle = "width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;";
+  const html = `
+    <div style="display:flex;flex-direction:column;gap:12px;text-align:left;margin-top:8px;">
+      <div>
+        <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text)">Provider Name</label>
+        <input type="text" id="cpName" value="${esc(name)}" ${isEdit ? 'disabled' : ''} placeholder="e.g. My Custom Provider" style="${inputStyle}">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text)">OpenAI Compatible API URL</label>
+        <input type="text" id="cpApiUrl" value="${esc(apiUrl)}" placeholder="https://api.example.com/v1" style="${inputStyle}">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text)">API Key</label>
+        <input type="password" id="cpApiKey" value="${esc(apiKey)}" placeholder="sk-..." style="${inputStyle}">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text)">Model Name (Optional)</label>
+        <input type="text" id="cpModel" value="${esc(model)}" placeholder="e.g. gpt-4" style="${inputStyle}">
+      </div>
+      <div id="cpTestResult" style="font-size:12px;display:none;margin-top:4px;"></div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button type="button" class="sm-btn" id="btnTestCp" onclick="_testCustomProvider()" style="background:var(--code-bg);color:var(--text);border:1px solid var(--border2);">Test Connectivity</button>
+      </div>
+    </div>
+  `;
+  
+  window._testCustomProvider = async function() {
+    const btn = $('btnTestCp');
+    const resEl = $('cpTestResult');
+    const apiUrl = $('cpApiUrl').value.trim();
+    const apiKey = $('cpApiKey').value.trim();
+    const model = $('cpModel').value.trim();
+    if(!apiUrl) { resEl.style.display=''; resEl.style.color='var(--error)'; resEl.textContent='API URL is required'; return; }
+    
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    resEl.style.display = 'none';
+    try {
+      const res = await api('/api/providers/custom/test', {
+        method: 'POST',
+        body: JSON.stringify({ api_url: apiUrl, api_key: apiKey, model: model })
+      });
+      resEl.style.display = '';
+      if(res.ok) {
+        resEl.style.color = 'var(--success, #4CAF50)';
+        resEl.textContent = res.message || 'Connection successful!';
+      } else {
+        resEl.style.color = 'var(--error)';
+        resEl.textContent = res.error || 'Connection failed';
+      }
+    } catch(e) {
+      resEl.style.display = '';
+      resEl.style.color = 'var(--error)';
+      resEl.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Test Connectivity';
+    }
+  };
+
+  showConfirmDialog({
+    title: isEdit ? 'Edit Custom Provider' : 'Add Custom Provider',
+    html: html,
+    confirmLabel: 'Save',
+    focusCancel: false,
+    preConfirm: () => {
+      const n = $('cpName').value.trim();
+      const url = $('cpApiUrl').value.trim();
+      const k = $('cpApiKey').value.trim();
+      const m = $('cpModel').value.trim();
+      if(!n) return 'Name is required';
+      if(!url) return 'API URL is required';
+      return {name:n, api_url:url, api_key:k, model:m};
+    }
+  }).then(async res => {
+    if(!res) return;
+    try {
+      const r = await api('/api/providers/custom', {
+        method: 'POST',
+        body: JSON.stringify(res)
+      });
+      if(r.ok) {
+        showToast('Custom provider saved');
+        loadProvidersPanel();
+      } else {
+        showToast(r.error || 'Failed to save');
+      }
+    } catch(e) {
+      showToast('Error: ' + e.message);
+    }
+  });
+}
+
+function _buildCustomProviderCard(cp) {
+  const card=document.createElement('div');
+  card.className='provider-card custom';
+  const metaText = 'Custom OpenAI API';
+  
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(cp.name)} <span style="font-size:10px;color:var(--muted);border:1px solid var(--border);padding:2px 4px;border-radius:4px;margin-left:4px">Custom</span></div>
+      <div class="provider-card-meta">${esc(metaText)}</div>
+    </div>
+    <span class="provider-card-badge">${esc(cp.api_url)}</span>
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+  
+  const row=document.createElement('div');
+  row.className='provider-card-row';
+  
+  const editBtn=document.createElement('button');
+  editBtn.type='button';
+  editBtn.className='provider-card-btn provider-card-btn-primary';
+  editBtn.textContent='Edit';
+  editBtn.onclick=()=>_openCustomProviderModal(cp);
+  
+  const removeBtn=document.createElement('button');
+  removeBtn.type='button';
+  removeBtn.className='provider-card-btn provider-card-btn-danger';
+  removeBtn.textContent='Remove';
+  removeBtn.onclick=async ()=>{
+    if(!await showConfirmDialog({title:'Remove '+cp.name+'?', confirmLabel:'Remove', danger:true})) return;
+    try {
+      const res = await api('/api/providers/custom/delete', { method:'POST', body:JSON.stringify({name:cp.name}) });
+      if(res.ok) { showToast('Removed'); loadProvidersPanel(); }
+      else showToast(res.error||'Failed to remove');
+    } catch(e) { showToast(e.message); }
+  };
+  
+  row.appendChild(editBtn);
+  row.appendChild(removeBtn);
+  body.appendChild(row);
+  card.appendChild(body);
+
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
 }
 
 function _buildProviderCard(p){

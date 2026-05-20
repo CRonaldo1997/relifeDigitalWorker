@@ -1058,14 +1058,26 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
+            _last_activity_time = [time.time()]
+            _activity_lock = threading.Lock()
+            _notified_thinking = [False]
+            _notified_slowness = [False]
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
+
+            def _update_activity():
+                with _activity_lock:
+                    _last_activity_time[0] = time.time()
+                    _checkpoint_activity[0] += 1
+                    _notified_thinking[0] = False  # Reset on any activity
+                    _notified_slowness[0] = False
 
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
                 _token_sent = True
+                _update_activity()
                 # Accumulate partial text so cancel_stream() can persist it (#893)
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
@@ -1075,6 +1087,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 nonlocal _reasoning_text
                 if text is None:
                     return
+                _update_activity()
                 _reasoning_text += str(text)
                 put('reasoning', {'text': str(text)})
 
@@ -1084,6 +1097,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _checkpoint_activity = [0]
 
             def on_tool(*cb_args, **cb_kwargs):
+                _update_activity()
                 event_type = None
                 name = None
                 preview = None
@@ -1339,15 +1353,42 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
             def _periodic_checkpoint():
                 last_saved_activity = 0
-                while not _checkpoint_stop.wait(15):
+                while not _checkpoint_stop.wait(5):  # Check every 5s instead of 15s for faster watchdog
                     try:
+                        # 1. Checkpoint logic
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
-                            with _agent_lock:
-                                s.save(skip_index=True)
-                            last_saved_activity = cur
+                            # Non-blocking acquire: if the main streaming thread or another
+                            # writer holds the lock, skip this checkpoint cycle rather than
+                            # blocking here and delaying the `done` event delivery.
+                            # The next 5s cycle will retry.
+                            if _agent_lock.acquire(timeout=1):
+                                try:
+                                    s.save(skip_index=True)
+                                finally:
+                                    _agent_lock.release()
+                                last_saved_activity = cur
+                            # else: lock busy — skip this cycle, retry in 5s
+
+                        # 2. Watchdog / Status logic
+                        with _activity_lock:
+                            idle_time = time.time() - _last_activity_time[0]
+                        
+                        if idle_time > 30 and not _notified_thinking[0]:
+                            put('status', {
+                                'label': 'progress',
+                                'message': "Agent is thinking deeply (likely processing large context)..."
+                            })
+                            _notified_thinking[0] = True
+                        
+                        if idle_time > 180 and not _notified_slowness[0]:
+                            put('status', {
+                                'label': 'warning',
+                                'message': "Agent is taking an unusually long time. It may still be processing, but if this persists for several more minutes, you might need to refresh and try a shorter prompt."
+                            })
+                            _notified_slowness[0] = True
                     except Exception as e:
-                        logger.debug("Periodic checkpoint save failed: %s", e)
+                        logger.debug("Periodic checkpoint/watchdog failed: %s", e)
 
             _checkpoint_stop = threading.Event()
             # Persist the user message BEFORE streaming starts so it's durable even if
@@ -1361,13 +1402,44 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             )
             _ckpt_thread.start()
 
-            result = agent.run_conversation(
-                user_message=workspace_ctx + msg_text,
-                system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
-                task_id=session_id,
-                persist_user_message=msg_text,
-            )
+            _t0 = time.time()
+            logger.info(f"[streaming] >>> Starting agent turn for session {session_id} (stream {stream_id})")
+            
+            # Pre-flight context check: warn if context is very large
+            try:
+                _history = _sanitize_messages_for_api(s.messages)
+                _full_text = (workspace_ctx + msg_text + workspace_system_msg + 
+                             "".join(str(m.get('content', '')) for m in _history))
+                _approx_tokens = len(_full_text) // 4
+                if _approx_tokens > 100000:
+                    put('status', {
+                        'label': 'progress',
+                        'message': f"Large context detected (~{_approx_tokens:,} tokens). The first response may take 1-3 minutes to start."
+                    })
+            except Exception:
+                pass
+
+            try:
+                result = agent.run_conversation(
+                    user_message=workspace_ctx + msg_text,
+                    system_message=workspace_system_msg,
+                    conversation_history=_sanitize_messages_for_api(s.messages),
+                    task_id=session_id,
+                    persist_user_message=msg_text,
+                )
+            except Exception as e:
+                _duration = time.time() - _t0
+                logger.error(f"Agent turn failed for session {session_id} after {_duration:.2f}s: {e}", exc_info=True)
+                put('apperror', {
+                    'label': 'Agent error',
+                    'message': f"The agent encountered an unexpected error: {str(e)}",
+                    'type': 'internal_error'
+                })
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                return
+            _duration = time.time() - _t0
+            logger.info(f"[streaming] <<< Agent turn completed for session {session_id} in {_duration:.2f}s")
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
                 _answer = ''
