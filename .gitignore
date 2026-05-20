@@ -58,6 +58,7 @@ THEMES.md
 docs/*
 !docs/ui-ux/
 !docs/ui-ux/**
+!docs/optimization-checklist.md
 
 # Tests / scratch / CI / dev helpers — excluded from runtime distribution
 tests/
