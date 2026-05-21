@@ -414,10 +414,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       else appendThinking();
       return;
     }
-    // Only remove thinking if we're not in an active reasoning phase.
-    // When reasoningText is set but liveReasoningText was just reset (post-tool),
-    // don't wipe the finalized thinking card — it has no id anymore so
-    // removeThinking() won't find it anyway, but guard explicitly.
+    // Only remove thinking if no reasoning was ever emitted this turn.
+    // Once reasoning has started, the single consolidated thinking card stays
+    // alive across tool calls and accumulates all reasoning chunks, so we
+    // must not wipe it after a tool event resets transient renderer state.
     if(!reasoningText) removeThinking();
   }
   // Helper: create (or recreate) the smd parser bound to a given DOM element.
@@ -601,26 +601,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _throttledPersist();
 
       if(!S.session||S.session.session_id!==activeSid) return;
-      // NOTE: don't removeThinking() here — keep the thinking card visible
-      // above the tool card so the turn reads top-to-bottom as:
-      // user → thinking → tool cards → response. Removing it caused the card
-      // to be re-created below everything when reasoning resumed post-tool.
-      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      liveReasoningText='';
-      // Cancel any pending rAF that was scheduled with pre-reset state.
-      // Without this, the queued rAF would still see the (now stale) cached
-      // _lastParsedState built from the pre-tool liveReasoningText and
-      // create a duplicate thinking card below the tool card containing the
-      // same content as the (already-finalized) card above it.
+      // Keep ONE thinking card per turn at the top, accumulating all reasoning
+      // across tool calls. The earlier behaviour finalized the card (removing
+      // its id) and reset liveReasoningText on every tool event, which made
+      // subsequent reasoning events create a NEW thinking card containing only
+      // the post-tool chunk. The visible result was a single thinking process
+      // being chopped into multiple cards each showing only partial content
+      // (see screenshot in #thinking-split bug report).
+      //
+      // Fix: don't finalize the card and don't reset liveReasoningText so the
+      // same #thinkingRow keeps absorbing new chunks. Edge case — if no
+      // reasoning was ever emitted before the tool fired, the spinner-only
+      // card would otherwise linger; drop it so the layout doesn't show an
+      // empty thinking placeholder above the tool card.
+      const _thinkingRow=$('thinkingRow');
+      if(_thinkingRow){
+        const _hasReasoningContent=_thinkingRow.querySelector('.thinking-card')
+          || _thinkingRow.classList.contains('thinking-card-row');
+        if(!_hasReasoningContent && _thinkingRow.getAttribute('data-thinking-active')==='1'){
+          _thinkingRow.remove();
+        }
+      }
+      // Cancel any pending rAF scheduled with pre-tool state to avoid a
+      // duplicate render firing before the next event loop tick.
       if(_pendingRafHandle!==null){
         try{cancelAnimationFrame(_pendingRafHandle);}catch(_){}
         try{clearTimeout(_pendingRafHandle);}catch(_){}
         _pendingRafHandle=null;
         _renderPending=false;
       }
-      // Invalidate parsed-state cache so the next render re-parses with the
-      // reset liveReasoningText (otherwise it would return cached pre-tool
-      // thinkingText, repopulating the new thinking card with old reasoning).
+      // Invalidate parsed-state cache so post-tool renders re-evaluate fresh
+      // (e.g. assistantText changes from any trailing token batch).
       _lastParsedState=null;
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
