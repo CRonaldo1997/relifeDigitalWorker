@@ -185,6 +185,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   let liveReasoningText='';
+  let postToolReasoningText='';  // Tracks reasoning content AFTER a tool call, for incremental updates
   let assistantRow=null;
   let assistantBody=null;
   let segmentStart=0;      // char offset in assistantText where current segment begins
@@ -306,7 +307,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
-  let _reconnectAttempted=false;
+  // Multi-attempt reconnect with exponential backoff. Earlier behaviour was
+  // a single 500ms retry — one transient blip would surface as a hard
+  // "Connection lost". We now retry up to 5 times with delays
+  // [500, 1000, 2000, 4000, 8000] ms, only giving up if every probe to
+  // /stream/status reports the stream inactive.
+  const _RECONNECT_DELAYS_MS=[500,1000,2000,4000,8000];
+  let _reconnectAttempts=0;
   let _terminalStateReached=false;
 
   // Bug A fix (#631): track whether the stream has been finalized so any rAF
@@ -558,6 +565,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
       liveReasoningText += d.text || '';
+      postToolReasoningText += d.text || '';  // Track post-tool reasoning incrementally
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       // Render thinking card synchronously — not via rAF — so the DOM is
@@ -565,6 +573,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // finalizeThinkingCard(). The old rAF-only path caused a race where
       // the thinking row was still a spinner when finalized.
       if(window._showThinking!==false){
+        // Use liveReasoningText (complete) for display, not just post-tool content
         if(typeof updateThinking==='function') updateThinking(liveReasoningText||'Thinking…');
         else appendThinking(liveReasoningText);
       }
@@ -591,7 +600,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // user → thinking → tool cards → response. Removing it caused the card
       // to be re-created below everything when reasoning resumed post-tool.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      liveReasoningText='';
+      // Reset post-tool reasoning tracker, but preserve liveReasoningText for final display
+      postToolReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       // Reset the live assistant row reference so that any text tokens arriving
@@ -839,12 +849,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource();
         return;
       }
-      // Attempt one reconnect if the stream is still active server-side
-      if(!_reconnectAttempted && streamId){
-        _reconnectAttempted=true;
-        setComposerStatus('Reconnecting…');
-        // 500ms initial delay — much faster than the old 1500ms, reduces
-        // perceived stall when the server sends a heartbeat-triggered reconnect.
+      // Attempt several reconnects with exponential backoff if the stream
+      // is still active server-side. Each attempt re-checks /stream/status,
+      // so a permanently-finished stream falls through immediately.
+      if(_reconnectAttempts<_RECONNECT_DELAYS_MS.length && streamId){
+        const delay=_RECONNECT_DELAYS_MS[_reconnectAttempts];
+        _reconnectAttempts++;
+        setComposerStatus(`Reconnecting… (${_reconnectAttempts}/${_RECONNECT_DELAYS_MS.length})`);
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
@@ -855,8 +866,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }catch(_){}
           if(await _restoreSettledSession()) return;
+          // Server says stream inactive — terminal failure. Give up.
           _handleStreamError();
-        },500);
+        },delay);
         return;
       }
       if(await _restoreSettledSession()) return;

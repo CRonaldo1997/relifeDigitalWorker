@@ -93,6 +93,16 @@ async function newSession(flash){
 }
 
 async function loadSession(sid){
+  // Cancel any in-flight loadSession from a previous click. Without this,
+  // rapidly switching sessions stacks awaits and the slowest one can
+  // overwrite a fresher session's state when it finally returns.
+  if(window._loadSessionCtrl){
+    try{window._loadSessionCtrl.abort();}catch(_){}
+  }
+  const _ctrl=new AbortController();
+  window._loadSessionCtrl=_ctrl;
+  const _sig=_ctrl.signal;
+  const _aborted=()=>_sig.aborted;
   stopApprovalPolling();hideApprovalCard();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard();
@@ -109,8 +119,9 @@ async function loadSession(sid){
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0`, {signal:_sig});
   } catch(e) {
+    if(_aborted()||(e&&e.name==='AbortError')) return; // superseded by newer loadSession
     const _msgInner = $('msgInner');
     if (_msgInner) {
       _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
@@ -118,6 +129,7 @@ async function loadSession(sid){
     if (typeof showToast === 'function') showToast('Failed to load session', 3000, 'error');
     return;
   }
+  if(_aborted()) return;
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
@@ -165,6 +177,7 @@ async function loadSession(sid){
     try {
       await _ensureMessagesLoaded(sid);
     } catch (e) {
+      if(_aborted()||(e&&e.name==='AbortError')) return;
       // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
       // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
       // "Loading conversation..." div injected at the top of loadSession would

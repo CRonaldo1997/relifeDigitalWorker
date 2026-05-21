@@ -1741,6 +1741,33 @@ function renderCompressionUi(){
 // for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+// In-place same-session no-op skip: many code paths fire renderMessages()
+// reactively (visibility change, polling, focus) without actually mutating
+// S.messages. A cheap structural fingerprint lets us bail out before tearing
+// down the entire #msgInner subtree and re-running Prism/Mermaid/KaTeX on
+// every message — which was a major source of "page hangs" on long sessions.
+let _renderFingerprint=null;
+function _computeRenderFingerprint(){
+  const sid=S.session?S.session.session_id:null;
+  const msgs=S.messages||[];
+  const tcs=S.toolCalls||[];
+  const last=msgs.length?msgs[msgs.length-1]:null;
+  let lastSig='';
+  if(last){
+    const c=typeof last.content==='string'
+      ? last.content.length
+      : (Array.isArray(last.content)?last.content.length:0);
+    const tcLen=Array.isArray(last.tool_calls)?last.tool_calls.length:0;
+    const atLen=Array.isArray(last.attachments)?last.attachments.length:0;
+    const ts=last._ts||last.timestamp||0;
+    lastSig=`${last.role||''}:${c}:${ts}:${tcLen}:${atLen}:${last.reasoning?last.reasoning.length:0}`;
+  }
+  let tcDoneCount=0;for(const tc of tcs){if(tc&&tc.done)tcDoneCount++;}
+  const inflight=sid&&INFLIGHT[sid]?1:0;
+  const anchor=(S.session&&typeof S.session.compression_anchor_visible_idx==='number')
+    ? S.session.compression_anchor_visible_idx : -1;
+  return `${sid}|${msgs.length}|${tcs.length}|${tcDoneCount}|${lastSig}|${inflight}|${anchor}|${S.activeStreamId||''}`;
+}
 
 function renderMessages(){
   const inner=$('msgInner');
@@ -1760,8 +1787,18 @@ function renderMessages(){
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
+      _renderFingerprint=_computeRenderFingerprint();
       return;
     }
+  }
+
+  // Same-session structural no-op: many event-driven callers re-invoke
+  // renderMessages() without any actual change. Skip the heavy rebuild.
+  // Live streaming sessions still rebuild because the smd parser writes
+  // into a DOM node — fingerprint check intentionally bails out for inflight.
+  const _curFp=_computeRenderFingerprint();
+  if(sid&&sid===_sessionHtmlCacheSid&&_curFp===_renderFingerprint&&!INFLIGHT[sid]){
+    return;
   }
 
   const compressionState=_compressionStateForCurrentSession();
@@ -2115,6 +2152,7 @@ function renderMessages(){
   }
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
+  _renderFingerprint=_computeRenderFingerprint();
   if(sid){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.

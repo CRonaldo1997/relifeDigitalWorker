@@ -1,8 +1,36 @@
+// Default request timeout (ms). Caller can override via opts.timeout, or pass
+// opts.timeout=0 / opts.signal to disable / supply own AbortController
+// (e.g. uploads, long-running POSTs). SSE/EventSource is unaffected — it
+// doesn't go through this helper.
+const API_DEFAULT_TIMEOUT_MS=30000;
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,location.href);
-  const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
+  const {timeout, signal: callerSignal, ...rest}=opts;
+  const tmo=(typeof timeout==='number')?timeout:API_DEFAULT_TIMEOUT_MS;
+  let ctrl=null, timer=null, signal=callerSignal||null;
+  if(tmo>0 && !callerSignal){
+    ctrl=new AbortController();
+    signal=ctrl.signal;
+    timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},tmo);
+  }
+  let res;
+  try{
+    res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...rest,signal});
+  }catch(e){
+    if(timer){clearTimeout(timer);timer=null;}
+    if(e&&e.name==='AbortError'){
+      // Distinguish caller-cancellation from our timeout firing.
+      if(callerSignal&&callerSignal.aborted) throw e;
+      const te=new Error(`Request timed out after ${Math.round(tmo/1000)}s: ${path}`);
+      te.name='TimeoutError';
+      te.timeout=true;
+      throw te;
+    }
+    throw e;
+  }
+  if(timer){clearTimeout(timer);timer=null;}
   if(!res.ok){
     const text=await res.text();
     // Parse JSON error body and surface the human-readable message,

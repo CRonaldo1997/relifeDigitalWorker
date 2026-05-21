@@ -780,10 +780,25 @@ function applyBotName(){
 }
 
 (async()=>{
-  // Load send key preference
+  // Boot fan-out: settings, active profile, models, workspaces, onboarding
+  // are independent — run in parallel so any single slow/failing endpoint no
+  // longer blocks the entire UI behind a 30s+ pending fetch.
   let _bootSettings={};
-  try{
-    const s=await api('/api/settings');
+  const _settingsPromise=api('/api/settings').catch(e=>{console.warn('boot settings',e);return null;});
+  const _profilePromise=api('/api/profile/active').catch(()=>null);
+  const _modelsPromise=(typeof populateModelDropdown==='function')
+    ? Promise.resolve().then(()=>populateModelDropdown()).catch(e=>{console.warn('boot models',e);})
+    : Promise.resolve();
+  const _wsListPromise=(typeof loadWorkspaceList==='function')
+    ? Promise.resolve().then(()=>loadWorkspaceList()).catch(e=>{console.warn('boot ws list',e);})
+    : Promise.resolve();
+  const _onboardingPromise=(typeof loadOnboardingWizard==='function')
+    ? Promise.resolve().then(()=>loadOnboardingWizard()).catch(e=>{console.warn('boot onboarding',e);})
+    : Promise.resolve();
+
+  // Settings drives theme/locale/bot name — apply as soon as available.
+  const s=await _settingsPromise;
+  if(s){
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
@@ -794,8 +809,6 @@ function applyBotName(){
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
     window._welcomeSuggestions=s.welcome_suggestions||[];
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
@@ -810,7 +823,7 @@ function applyBotName(){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     applyBotName();
-  }catch(e){
+  }else{
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showCliSessions=false;
@@ -836,13 +849,14 @@ function applyBotName(){
     const _checkUrl='/api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
-  // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  // Active profile (parallel with settings — apply when ready)
+  const p=await _profilePromise;
+  S.activeProfile=(p&&p.name)||'default';
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
-  // Fetch available models from server and populate dropdown dynamically
-  await populateModelDropdown();
+  // Wait for models & workspaces (already running in parallel) so first render is correct.
+  await Promise.allSettled([_modelsPromise, _wsListPromise, _onboardingPromise]);
   // Restore last-used model preference
   const savedModel=localStorage.getItem('hermes-webui-model');
   if(savedModel && $('modelSelect')){
@@ -851,9 +865,6 @@ function applyBotName(){
     if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
     else if(typeof syncModelChip==='function') syncModelChip();
   }
-  // Pre-load workspace list so sidebar name is correct from first render
-  await loadWorkspaceList();
-  await loadOnboardingWizard();
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).

@@ -4,11 +4,11 @@
 
 ## P0 — 直接消除"页面卡住"
 
-- [ ] **`api()` 增加超时与中止**：`static/workspace.js:1` 的 `fetch` 包 `AbortController`，默认 30s（SSE/上传单独配置）；超时后渲染明确错误而非无限等待。
-- [ ] **boot 串行 await 改并行**：`static/boot.js:782` 中 `populateModelDropdown / loadWorkspaceList / loadOnboardingWizard / 设置请求` 用 `Promise.allSettled` 并行；任一失败不阻塞其它。
-- [ ] **SSE 重连支持指数退避 + 多次尝试**：`static/messages.js:836` 的 `_reconnectAttempted` 单次重连改为 `1s/2s/4s/8s`，并暴露"重新连接"按钮，避免一次失败即变 "Connection lost"。
-- [ ] **`renderMessages()` 增量化**：`static/ui.js:1745` 不再 `inner.innerHTML=''` 全量重建；按 message id diff，只对新增/变更节点跑 Prism/Mermaid/KaTeX。
-- [ ] **`loadSession` 切换互斥**：快速切会话时取消上一次未完成的 fetch（保留 AbortController），避免堆栈式 await 拖慢 UI。
+- [x] **`api()` 增加超时与中止**：`static/workspace.js:1` 的 `fetch` 包 `AbortController`，默认 30s（SSE/上传单独配置）；超时后渲染明确错误而非无限等待。
+- [x] **boot 串行 await 改并行**：`static/boot.js:782` 中 `populateModelDropdown / loadWorkspaceList / loadOnboardingWizard / 设置请求` 用 `Promise.allSettled` 并行；任一失败不阻塞其它。
+- [x] **SSE 重连支持指数退避 + 多次尝试**：`static/messages.js:836` 的 `_reconnectAttempted` 单次重连改为 `1s/2s/4s/8s`，并暴露"重新连接"按钮，避免一次失败即变 "Connection lost"。
+- [x] **`renderMessages()` 增量化**：`static/ui.js:1745` 不再 `inner.innerHTML=''` 全量重建；按 message id diff，只对新增/变更节点跑 Prism/Mermaid/KaTeX。
+- [x] **`loadSession` 切换互斥**：快速切会话时取消上一次未完成的 fetch（保留 AbortController），避免堆栈式 await 拖慢 UI。
 
 ## P1 — 服务端稳定性
 
