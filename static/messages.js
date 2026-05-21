@@ -185,7 +185,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   let liveReasoningText='';
-  let postToolReasoningText='';  // Tracks reasoning content AFTER a tool call, for incremental updates
   let assistantRow=null;
   let assistantBody=null;
   let segmentStart=0;      // char offset in assistantText where current segment begins
@@ -235,11 +234,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   // Performance cache: store the latest parsed stream state to avoid redundant parsing
   // across multiple handlers (token listener, rAF renderer, etc).
+  // The cache key must include all inputs to _parseStreamState: assistantText,
+  // reasoningText (presence flag), and liveReasoningText. Using only assistantText
+  // caused stale thinkingText to be reused after a tool call reset liveReasoningText,
+  // duplicating pre-tool reasoning into the post-tool thinking card.
   let _lastParsedState = null;
   function _getParsedState() {
-    if (_lastParsedState && _lastParsedState._raw === assistantText) return _lastParsedState;
+    if (_lastParsedState
+      && _lastParsedState._raw === assistantText
+      && _lastParsedState._reasoning === liveReasoningText
+      && _lastParsedState._hasReasoning === !!reasoningText) return _lastParsedState;
     const p = _parseStreamState();
     p._raw = assistantText;
+    p._reasoning = liveReasoningText;
+    p._hasReasoning = !!reasoningText;
     _lastParsedState = p;
     return p;
   }
@@ -565,7 +573,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
       liveReasoningText += d.text || '';
-      postToolReasoningText += d.text || '';  // Track post-tool reasoning incrementally
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       // Render thinking card synchronously — not via rAF — so the DOM is
@@ -573,7 +580,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // finalizeThinkingCard(). The old rAF-only path caused a race where
       // the thinking row was still a spinner when finalized.
       if(window._showThinking!==false){
-        // Use liveReasoningText (complete) for display, not just post-tool content
         if(typeof updateThinking==='function') updateThinking(liveReasoningText||'Thinking…');
         else appendThinking(liveReasoningText);
       }
@@ -600,8 +606,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // user → thinking → tool cards → response. Removing it caused the card
       // to be re-created below everything when reasoning resumed post-tool.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      // Reset post-tool reasoning tracker, but preserve liveReasoningText for final display
-      postToolReasoningText='';
+      liveReasoningText='';
+      // Cancel any pending rAF that was scheduled with pre-reset state.
+      // Without this, the queued rAF would still see the (now stale) cached
+      // _lastParsedState built from the pre-tool liveReasoningText and
+      // create a duplicate thinking card below the tool card containing the
+      // same content as the (already-finalized) card above it.
+      if(_pendingRafHandle!==null){
+        try{cancelAnimationFrame(_pendingRafHandle);}catch(_){}
+        try{clearTimeout(_pendingRafHandle);}catch(_){}
+        _pendingRafHandle=null;
+        _renderPending=false;
+      }
+      // Invalidate parsed-state cache so the next render re-parses with the
+      // reset liveReasoningText (otherwise it would return cached pre-tool
+      // thinkingText, repopulating the new thinking card with old reasoning).
+      _lastParsedState=null;
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       // Reset the live assistant row reference so that any text tokens arriving
